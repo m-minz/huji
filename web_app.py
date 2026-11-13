@@ -14,6 +14,7 @@ import os
 import json
 import sqlite3
 import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -2110,9 +2111,12 @@ class ShnatonHandler(BaseHTTPRequestHandler):
     def handle_roadmap_curriculum(self, code: str):
         # 1. Check SQLite cache
         cached = database.get_roadmap_curriculum(code, DB_PATH)
-        if cached:
-            self.send_json(cached)
-            return
+        # Use cache only if it has the updated rich fields
+        if cached and cached.get("years") and len(cached["years"]) > 0:
+            first_cat = cached["years"][0].get("categories", [{}])[0]
+            if "category_type" in first_cat and "obligation_text" in first_cat:
+                self.send_json(cached)
+                return
 
         # 2. Fetch live from Shnaton API
         url = f"https://shnaton.huji.ac.il/api/yearly-roadmaps/{code}/thresholds?activeYear=2027&thresholdYear=2027&include=1"
@@ -2120,7 +2124,8 @@ class ShnatonHandler(BaseHTTPRequestHandler):
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
             with urllib.request.urlopen(req, timeout=8) as resp:
                 raw_data = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        except Exception as e:
+            print("API fetch failed for roadmap:", code, type(e), e)
             # Fallback to courses mapped to roadmap in database
             conn = database.get_connection(DB_PATH)
             cur = conn.cursor()
@@ -2141,19 +2146,32 @@ class ShnatonHandler(BaseHTTPRequestHandler):
                 first_y = int(y_str.split(",")[0]) if y_str.split(",")[0].isdigit() else 1
                 if first_y not in years_map:
                     years_map[first_y] = []
+                sem_str = r.get("semester_name_he") or ""
+                sem_type, sem_badge = self._parse_semester_type(sem_str)
+                r["semester_type"] = sem_type
+                r["semester_badge"] = sem_badge
                 years_map[first_y].append(r)
 
             years_list = []
             for y_num in sorted(years_map.keys()):
                 label = f"שנה {['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳'][min(y_num - 1, 5)]}"
+                total_pts = sum(c.get("academic_points", 0) or 0 for c in years_map[y_num])
                 years_list.append({
                     "year_number": y_num,
                     "year_label": label,
+                    "mandatory_points": total_pts,
+                    "required_elective_min_points": 0,
+                    "elective_min_points": 0,
+                    "year_required_min_points": total_pts,
                     "categories": [
                         {
                             "subchapter": "קורסי התוכנית",
+                            "category_type": "mandatory",
+                            "category_label": "חובה",
                             "is_mandatory": True,
-                            "min_points": sum(c.get("academic_points", 0) or 0 for c in years_map[y_num]),
+                            "min_points": total_pts,
+                            "max_points": total_pts,
+                            "obligation_text": f"חובה ללמוד את כל הקורסים ({total_pts} נ\"ז סה\"כ)",
                             "note": "",
                             "courses": years_map[y_num]
                         }
@@ -2186,6 +2204,14 @@ class ShnatonHandler(BaseHTTPRequestHandler):
         total_courses_count = 0
 
         for t in thresholds:
+            raw_courses = t.get("courses", [])
+            min_naz = t.get("minNaz", 0) or 0
+            max_naz = t.get("maxNaz")
+
+            # Skip empty placeholders
+            if len(raw_courses) == 0 and min_naz == 0:
+                continue
+
             y = t.get("displayAcademicYear")
             if not y and t.get("fromToAcademicYear"):
                 valid_yrs = [yr for yr in t.get("fromToAcademicYear", []) if yr and yr > 0]
@@ -2196,16 +2222,45 @@ class ShnatonHandler(BaseHTTPRequestHandler):
                 years_dict[y] = []
 
             sub_he = (t.get("subChapter") or {}).get("he") if isinstance(t.get("subChapter"), dict) else (t.get("subChapter") or "כללי")
-            is_mand = bool(t.get("isMandatory") or "חובה" in sub_he)
-            min_naz = t.get("minNaz", 0) or 0
+            is_mand_flag = bool(t.get("isMandatory"))
+            
+            # 3-tier Classification
+            cat_type, cat_label = self._classify_curriculum_category(sub_he, is_mand_flag, min_naz)
+            
+            # Clear obligation explanation
+            if cat_type == "mandatory":
+                courses_sum = sum(c.get("academicPoints", 0) or 0 for c in raw_courses)
+                pts_label = min_naz if min_naz > 0 else courses_sum
+                obligation_text = f"חובה ללמוד את כל הקורסים ({pts_label} נ\"ז סה\"כ)"
+            elif cat_type == "required_elective":
+                if max_naz and max_naz > min_naz:
+                    obligation_text = f"חובה לבחור בין {min_naz} ל-{max_naz} נ\"ז מתוך רשימה זו"
+                elif min_naz > 0:
+                    obligation_text = f"חובה לבחור לפחות {min_naz} נ\"ז מתוך רשימה זו"
+                else:
+                    obligation_text = "קורסי חובת בחירה"
+            elif cat_type == "elective":
+                if min_naz > 0:
+                    obligation_text = f"יש לצבור לפחות {min_naz} נ\"ז מתוך הרשימה"
+                elif max_naz:
+                    obligation_text = f"ניתן ללמוד עד {max_naz} נ\"ז מתוך הרשימה"
+                else:
+                    obligation_text = "קורסי בחירה חופשית"
+            elif cat_type == "cornerstone":
+                obligation_text = f"תוכנית אבני פינה{' (מינימום ' + str(min_naz) + ' נ\"ז)' if min_naz > 0 else ''}"
+            elif cat_type == "workshop":
+                obligation_text = "סדנאות עזר וליווי אקדמי (רשות, ללא עלות נ\"ז)"
+            else:
+                obligation_text = f"דרישת מינימום: {min_naz} נ\"ז" if min_naz > 0 else "קורסים נוספים והעשרה"
+
             note = (t.get("hebrewNote") or "").strip()
             
-            raw_courses = t.get("courses", [])
             parsed_courses = []
             for c in raw_courses:
                 c_name = (c.get("name") or {}).get("he") if isinstance(c.get("name"), dict) else str(c.get("name", ""))
                 c_name_en = (c.get("name") or {}).get("en") if isinstance(c.get("name"), dict) else ""
                 period_name = (c.get("coursePeriodName") or {}).get("he") if isinstance(c.get("coursePeriodName"), dict) else ""
+                sem_type, sem_badge = self._parse_semester_type(period_name)
                 pts = c.get("academicPoints") or 0
                 parsed_courses.append({
                     "id": c.get("id"),
@@ -2214,27 +2269,54 @@ class ShnatonHandler(BaseHTTPRequestHandler):
                     "name_en": c_name_en,
                     "academic_points": pts,
                     "semester_name_he": period_name,
+                    "semester_type": sem_type,
+                    "semester_badge": sem_badge,
                     "course_structure": c.get("courseStructureType", "")
                 })
                 total_courses_count += 1
 
             years_dict[y].append({
                 "subchapter": sub_he,
-                "is_mandatory": is_mand,
+                "category_type": cat_type,
+                "category_label": cat_label,
+                "is_mandatory": cat_type == "mandatory",
                 "min_points": min_naz,
+                "max_points": max_naz,
+                "obligation_text": obligation_text,
                 "note": note,
                 "order": t.get("subChapterOrder", 0) or 0,
                 "courses": parsed_courses
             })
 
+        category_order = {
+            "mandatory": 0,
+            "required_elective": 1,
+            "elective": 2,
+            "cornerstone": 3,
+            "enrichment": 4,
+            "workshop": 5,
+            "other": 6
+        }
+
         structured_years = []
         for y_num in sorted(years_dict.keys()):
             categories = years_dict[y_num]
-            categories.sort(key=lambda cat: (0 if cat["is_mandatory"] else 1, cat["order"]))
+            categories.sort(key=lambda cat: (category_order.get(cat["category_type"], 9), cat["order"]))
+            
+            mand_pts = sum(cat["min_points"] if cat["min_points"] > 0 else sum(c["academic_points"] for c in cat["courses"]) 
+                           for cat in categories if cat["category_type"] == "mandatory")
+            req_elec_pts = sum(cat["min_points"] for cat in categories if cat["category_type"] == "required_elective")
+            elec_pts = sum(cat["min_points"] for cat in categories if cat["category_type"] == "elective")
+            total_req = mand_pts + req_elec_pts + elec_pts
+            
             label = f"שנה {['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳'][min(y_num - 1, 5)]}"
             structured_years.append({
                 "year_number": y_num,
                 "year_label": label,
+                "mandatory_points": mand_pts,
+                "required_elective_min_points": req_elec_pts,
+                "elective_min_points": elec_pts,
+                "year_required_min_points": total_req,
                 "categories": categories
             })
 
@@ -2253,6 +2335,36 @@ class ShnatonHandler(BaseHTTPRequestHandler):
         # Cache in SQLite
         database.save_roadmap_curriculum(code, title_he, title_en, curriculum_result, DB_PATH)
         self.send_json(curriculum_result)
+
+    def _classify_curriculum_category(self, sub_he: str, is_mand_flag: bool, min_naz: float) -> tuple:
+        sub = (sub_he or "").strip()
+        if sub == "חובה" or (is_mand_flag and "בחירה" not in sub):
+            return "mandatory", "חובה"
+        elif "חובת בחירה" in sub or (min_naz > 0 and not is_mand_flag and "בחירה" in sub and "מרחיבי" not in sub and "נוספים" not in sub):
+            return "required_elective", "חובת בחירה"
+        elif "אבני פינה" in sub:
+            return "cornerstone", "אבני פינה"
+        elif "סדנא" in sub:
+            return "workshop", "סדנת עזר"
+        elif "מרחיב" in sub or "העשרה" in sub:
+            return "enrichment", "הרחבת דעת"
+        else:
+            return "elective", "בחירה"
+
+    def _parse_semester_type(self, sem_str: str) -> tuple:
+        s = (sem_str or "").strip()
+        if "או ב" in s:
+            return "sem_either", "🔀 סמסטר א׳ או ב׳"
+        elif "סמסטר א" in s:
+            return "sem_a", "☀️ סמסטר א׳"
+        elif "סמסטר ב" in s:
+            return "sem_b", "🌱 סמסטר ב׳"
+        elif "שנתי" in s:
+            return "sem_year", "🔄 שנתי"
+        elif "קיץ" in s:
+            return "sem_summer", "🏖️ סמסטר קיץ"
+        else:
+            return "sem_other", s or "לא נקבע"
 
     def handle_rooms(self):
         rooms = database.get_all_rooms(DB_PATH)
