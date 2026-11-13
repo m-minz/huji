@@ -1,8 +1,11 @@
 # Dockerfile for Hebrew University Course Catalog (HUJI Shnaton)
 FROM python:3.11-slim
 
-# Prevent python from buffering stdout/stderr
+# Prevent python from buffering stdout/stderr and enforce UTF-8
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     PORT=8080 \
     HOST=0.0.0.0
 

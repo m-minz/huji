@@ -16,7 +16,10 @@ import sqlite3
 import urllib.parse
 import urllib.request
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+try:
+    from http.server import ThreadingHTTPServer as HTTPServer, BaseHTTPRequestHandler
+except ImportError:
+    from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from typing import List, Dict, Any, Optional
 
@@ -1787,10 +1790,21 @@ INDEX_HTML = """<!DOCTYPE html>
 """
 
 class ShnatonHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+
+        if path in ("/_health", "/health", "/_ah/health", "/ping"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
 
         if path in ("/", "/index.html"):
             html_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
@@ -2247,7 +2261,10 @@ class ShnatonHandler(BaseHTTPRequestHandler):
                 else:
                     obligation_text = "קורסי בחירה חופשית"
             elif cat_type == "cornerstone":
-                obligation_text = f"תוכנית אבני פינה{' (מינימום ' + str(min_naz) + ' נ\"ז)' if min_naz > 0 else ''}"
+                if min_naz > 0:
+                    obligation_text = f"תוכנית אבני פינה (מינימום {min_naz} נ\"ז)"
+                else:
+                    obligation_text = "תוכנית אבני פינה"
             elif cat_type == "workshop":
                 obligation_text = "סדנאות עזר וליווי אקדמי (רשות, ללא עלות נ\"ז)"
             else:
@@ -2493,22 +2510,34 @@ class ShnatonHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_web_gui(host: str = HOST, port: int = PORT, open_browser: bool = None):
+def run_web_gui(host: str = None, port: int = None, open_browser: bool = None):
+    if host is None:
+        host = os.environ.get("HOST", "0.0.0.0")
+    if port is None:
+        port = int(os.environ.get("PORT", "8080"))
+
     if open_browser is None:
         # In cloud environments (Render, Cloud Run, Docker etc.), do not try to open desktop browser
-        open_browser = not bool(os.environ.get("PORT") or os.environ.get("K_SERVICE") or os.environ.get("RENDER"))
+        open_browser = not bool(os.environ.get("K_SERVICE") or os.environ.get("RENDER") or os.environ.get("DYNO"))
+
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer((host, port), ShnatonHandler)
+    if hasattr(server, "daemon_threads"):
+        server.daemon_threads = True
+
     url = f"http://localhost:{port}/" if host in ("0.0.0.0", "127.0.0.1") else f"http://{host}:{port}/"
     print("=" * 65)
-    print(f"  ממשק משתמש מתקדם שנתון האוניברסיטה העברית פועל בכתובת:")
-    print(f"  {url} (מאזין ב-{host}:{port})")
+    print(f"  HUJI Shnaton Web Server is running at:")
+    print(f"  {url} (listening on {host}:{port})")
     print("=" * 65)
+    sys.stdout.flush()
+
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nהשרת נעצר.")
+        print("\nServer stopped.")
 
 if __name__ == "__main__":
     run_web_gui()

@@ -11,14 +11,24 @@ import re
 import threading
 from typing import List, Dict, Any, Optional
 
-DEFAULT_DB_PATH = "shnaton.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DB_PATH = os.path.join(BASE_DIR, "shnaton.db")
 _db_lock = threading.Lock()
 
 def get_connection(db_path: str = DEFAULT_DB_PATH, timeout: float = 30.0) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=timeout)
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA foreign_keys = ON;")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("PRAGMA synchronous = NORMAL;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+    except sqlite3.OperationalError:
+        pass
     conn.row_factory = sqlite3.Row
     return conn
 
