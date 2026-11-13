@@ -1,0 +1,2 @@
+# No external pip dependencies required!
+# This application runs on pure Python Standard Library (Python 3.8+).

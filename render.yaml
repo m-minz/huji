@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: huji-shnaton
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python web_app.py
+    envVars:
+      - key: PORT
+        value: 10000
