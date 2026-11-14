@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Backups and temporary folders
+backup_v*/
+huji_live_frontend/
+huji_cloud_deploy/
+test_*.py
+test_*.js
+inspect_*.py
+
+# Raw uncompressed database (GitHub Pages serves shnaton.db.gz which is 18.7MB)
+shnaton.db
+shnaton_courses.json
+shnaton_sessions.csv
+
+# OS metadata
+.DS_Store
+Thumbs.db

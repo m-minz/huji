@@ -1,0 +1,64 @@
+name: Refresh Shnaton Database & Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Refresh Mode'
+        required: true
+        default: 'exams'
+        type: choice
+        options:
+          - exams
+          - full
+          - compress-only
+      year:
+        description: 'Academic Year'
+        required: true
+        default: '2027'
+  schedule:
+    # Run automatically every Sunday at 03:00 UTC
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'shnaton-db-refresh'
+  cancel-in-progress: false
+
+jobs:
+  refresh-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run DB Refresh & Compression
+        run: |
+          MODE="${{ github.event.inputs.mode || 'exams' }}"
+          YEAR="${{ github.event.inputs.year || '2027' }}"
+          python refresh_and_build.py --mode "$MODE" --year "$YEAR"
+
+      - name: Commit and Push Updated Database
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add shnaton.db.gz version.json
+          git diff --staged --quiet || git commit -m "Auto-refresh Shnaton DB ($MODE) [skip ci]"
+          git push
