@@ -519,6 +519,8 @@
                 c.id AS course_id,
                 c.code AS course_code,
                 c.name_he AS course_name,
+                c.name_he AS course_name_he,
+                c.name_en AS course_name_en,
                 c.academic_points,
                 g.group_code,
                 g.session_type_name_he AS session_type,
@@ -691,10 +693,10 @@
         if (!code) return null;
 
         // 1. Check roadmap_curricula table
-        const cached = querySingle("SELECT curriculum_json FROM roadmap_curricula WHERE roadmap_code = :code", { ':code': code });
-        if (cached && cached.curriculum_json) {
+        const cached = querySingle("SELECT data_json FROM roadmap_curricula WHERE roadmap_code = :code", { ':code': code });
+        if (cached && cached.data_json) {
             try {
-                const parsed = JSON.parse(cached.curriculum_json);
+                const parsed = JSON.parse(cached.data_json);
                 if (parsed.years && parsed.years.length > 0) {
                     return parsed;
                 }
@@ -810,30 +812,42 @@
     }
 
     window.fetch = async function (resource, options) {
-        const urlStr = typeof resource === 'string' ? resource : (resource ? resource.url : '');
+        let urlStr = typeof resource === 'string' ? resource : (resource && resource.url ? resource.url : '');
 
-        // Intercept only /api/* calls
-        if (urlStr.startsWith('/api/') || urlStr.startsWith('api/')) {
+        // Normalize URL to handle GitHub Pages subpaths:
+        // Matches /api/*, api/*, /huji/api/*, https://.../api/*, https://.../huji/api/*
+        let pathname = '';
+        let params = new URLSearchParams();
+        try {
+            const urlObj = new URL(urlStr, window.location.href);
+            pathname = urlObj.pathname;
+            params = urlObj.searchParams;
+        } catch (e) {
+            pathname = urlStr.split('?')[0];
+            const qIdx = urlStr.indexOf('?');
+            if (qIdx !== -1) params = new URLSearchParams(urlStr.slice(qIdx + 1));
+        }
+
+        const apiMatch = pathname.match(/(?:\/huji)?\/api(\/[a-zA-Z0-9_\-\/]*)/);
+        if (apiMatch) {
+            const apiPath = '/api' + (apiMatch[1] || '');
+
             // Wait for DB ready
             if (!isDbReady) {
                 await new Promise(resolve => readyCallbacks.push(resolve));
             }
 
-            const urlObj = new URL(urlStr, window.location.origin);
-            const path = urlObj.pathname.startsWith('/') ? urlObj.pathname : '/' + urlObj.pathname;
-            const params = urlObj.searchParams;
-
             let result = null;
 
             try {
-                if (path === '/api/faculties') {
+                if (apiPath === '/api/faculties') {
                     result = handleFaculties();
-                } else if (path === '/api/departments') {
+                } else if (apiPath === '/api/departments') {
                     result = handleDepartments(params);
-                } else if (path === '/api/search') {
+                } else if (apiPath === '/api/search') {
                     result = handleSearch(params);
-                } else if (path.startsWith('/api/course/')) {
-                    const cid = path.split('/').pop();
+                } else if (apiPath.startsWith('/api/course/')) {
+                    const cid = apiPath.split('/').filter(Boolean).pop();
                     result = handleCourseDetail(cid);
                     if (!result) {
                         return new Response(JSON.stringify({ error: "Course Not Found" }), {
@@ -841,33 +855,32 @@
                             headers: { 'Content-Type': 'application/json; charset=utf-8' }
                         });
                     }
-                } else if (path === '/api/exams') {
+                } else if (apiPath === '/api/exams') {
                     result = handleExams(params);
-                } else if (path === '/api/rooms') {
+                } else if (apiPath === '/api/rooms') {
                     result = handleRooms();
-                } else if (path === '/api/room/schedule') {
+                } else if (apiPath === '/api/room/schedule') {
                     result = handleRoomSchedule(params);
-                } else if (path === '/api/map/buildings') {
-                    // Try fetching static json
+                } else if (apiPath === '/api/map/buildings') {
                     try {
                         const mRes = await window.__originalFetch('campus_buildings.json');
                         if (mRes.ok) return mRes;
                     } catch (e) { }
                     result = [];
-                } else if (path === '/api/autocomplete') {
+                } else if (apiPath === '/api/autocomplete') {
                     result = handleAutocomplete(params);
-                } else if (path === '/api/stats') {
+                } else if (apiPath === '/api/stats') {
                     result = handleStats();
-                } else if (path === '/api/teachers') {
+                } else if (apiPath === '/api/teachers') {
                     result = handleTeachers(params);
-                } else if (path === '/api/teacher/detail') {
+                } else if (apiPath === '/api/teacher/detail') {
                     result = handleTeacherDetail(params);
-                } else if (path === '/api/roadmaps') {
+                } else if (apiPath === '/api/roadmaps') {
                     result = handleRoadmaps(params);
-                } else if (path === '/api/roadmap/curriculum') {
+                } else if (apiPath === '/api/roadmap/curriculum') {
                     result = handleRoadmapCurriculum(params);
                 } else {
-                    return new Response(JSON.stringify({ error: "Endpoint not found" }), {
+                    return new Response(JSON.stringify({ error: "Endpoint not found: " + apiPath }), {
                         status: 404,
                         headers: { 'Content-Type': 'application/json; charset=utf-8' }
                     });
@@ -878,7 +891,7 @@
                     headers: { 'Content-Type': 'application/json; charset=utf-8' }
                 });
             } catch (err) {
-                console.error('[DB Engine] API Error on ' + path + ':', err);
+                console.error('[DB Engine] API Error on ' + apiPath + ':', err);
                 return new Response(JSON.stringify({ error: err.message }), {
                     status: 500,
                     headers: { 'Content-Type': 'application/json; charset=utf-8' }

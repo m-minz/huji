@@ -5468,25 +5468,29 @@
        COURSE DETAIL FULL-SCREEN MODAL
        ========================================================================== */
     async function openCourseModal(courseId, initialTab = 'overview') {
-      State.currentModalCourseId = courseId;
+      let lookupId = courseId;
+      if ((!lookupId || lookupId === 0 || lookupId === '0') && typeof initialTab === 'string' && /^\d+/.test(initialTab)) {
+        lookupId = initialTab;
+        initialTab = 'overview';
+      }
+      if (!lookupId) return;
+
+      State.currentModalCourseId = lookupId;
       const modal = document.getElementById("courseDetailModal");
       modal.classList.add("active");
       switchModalSubtab(initialTab);
 
       try {
-        const res = await fetch("/api/course/" + courseId);
-        if (!res.ok) throw new Error("Failed to load course details");
+        const res = await fetch("/api/course/" + lookupId);
+        if (!res.ok) throw new Error("Failed to load course details (HTTP " + res.status + ")");
         const c = await res.json();
         populateModalData(c, initialTab);
       } catch (err) {
         console.warn("API error loading course details, falling back to local item:", err);
-        const c = State.courses.find(x => x.id === courseId) || {
-          id: courseId,
-          code: courseId,
-          name_he: "קורס לדוגמה",
-          description: "תיאור קורס במסגרת תוכנית הלימודים של האוניברסיטה העברית בירושלים."
-        };
-        populateModalData(c, initialTab);
+        const c = State.courses.find(x => x.id == lookupId || x.code == lookupId);
+        if (c) {
+          populateModalData(c, initialTab);
+        }
       }
     }
 
